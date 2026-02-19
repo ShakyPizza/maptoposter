@@ -536,15 +536,14 @@ def create_poster(
     dist,
     output_file,
     output_format,
-    width=12,
-    height=16,
+    width: float = 12,
+    height: float = 16,
     country_label=None,
     name_label=None,
     display_city=None,
     display_country=None,
     fonts=None,
-    marker_point=None,
-    marker_label="Home",
+    markers=None,
 ):
     """
     Generate a complete map poster with roads, water, parks, and typography.
@@ -663,24 +662,12 @@ def create_poster(
     ax.set_xlim(crop_xlim)
     ax.set_ylim(crop_ylim)
 
-    # Layer 2.5: Marker
-    if marker_point is not None:
-        marker_lat, marker_lon = marker_point
-        marker_proj = ox.projection.project_geometry(
-            Point(marker_lon, marker_lat),
-            crs="EPSG:4326",
-            to_crs=g_proj.graph["crs"],
-        )[0]
-        marker_x, marker_y = marker_proj.x, marker_proj.y
-
+    # Layer 2.5: Markers
+    if markers:
         scale_factor_marker = min(height, width) / 12.0
         dot_size = 8 * scale_factor_marker
-        ax.plot(
-            marker_x, marker_y, 'o',
-            color=THEME["text"],
-            markersize=dot_size,
-            zorder=9,
-        )
+        x_range = crop_xlim[1] - crop_xlim[0]
+        label_offset_x = x_range * 0.015
 
         active_marker_fonts = fonts or FONTS
         if active_marker_fonts:
@@ -693,18 +680,37 @@ def create_poster(
                 family="monospace", size=12 * scale_factor_marker,
             )
 
-        # Offset label to the right of the dot
-        x_range = crop_xlim[1] - crop_xlim[0]
-        label_offset_x = x_range * 0.015
-        ax.annotate(
-            marker_label,
-            xy=(marker_x, marker_y),
-            xytext=(marker_x + label_offset_x, marker_y),
-            color=THEME["text"],
-            fontproperties=marker_font,
-            va="center",
-            zorder=9,
-        )
+        for marker_point, marker_label in markers:
+            marker_lat, marker_lon = marker_point
+            marker_proj = ox.projection.project_geometry(
+                Point(marker_lon, marker_lat),
+                crs="EPSG:4326",
+                to_crs=g_proj.graph["crs"],
+            )[0]
+            marker_x, marker_y = marker_proj.x, marker_proj.y
+
+            in_x = crop_xlim[0] <= marker_x <= crop_xlim[1]
+            in_y = crop_ylim[0] <= marker_y <= crop_ylim[1]
+            if not (in_x and in_y):
+                print(f"  ⚠ Marker '{marker_label or marker_point}' is outside the visible map area!")
+
+            ax.plot(
+                marker_x, marker_y, 'o',
+                color=THEME["text"],
+                markersize=dot_size,
+                zorder=11,
+            )
+
+            if marker_label:
+                ax.annotate(
+                    marker_label,
+                    xy=(marker_x, marker_y),
+                    xytext=(marker_x + label_offset_x, marker_y),
+                    color=THEME["text"],
+                    fontproperties=marker_font,
+                    va="center",
+                    zorder=11,
+                )
 
     # Layer 3: Gradients (Top and Bottom)
     create_gradient_fade(ax, THEME['gradient_color'], location='bottom', zorder=10)
@@ -1054,14 +1060,18 @@ Examples:
         "--marker",
         "-m",
         type=str,
-        help='Address to place a marker dot on the map (e.g., "Stóragerði 40, Reykjavík")',
+        action="append",
+        dest="markers",
+        metavar="ADDRESS",
+        help='Address to place a marker dot on the map. Can be repeated for multiple markers.',
     )
     parser.add_argument(
         "--marker-label",
-        dest="marker_label",
         type=str,
-        default="Home",
-        help='Label text next to the marker dot (default: "Home")',
+        action="append",
+        dest="marker_labels",
+        metavar="LABEL",
+        help='Label for the corresponding --marker (use "" to skip). Defaults to "Home" for the first marker.',
     )
 
     args = parser.parse_args()
@@ -1129,10 +1139,14 @@ Examples:
         else:
             coords = get_coordinates(args.city, args.country)
 
-        # Geocode marker if provided
-        marker_coords = None
-        if args.marker:
-            marker_coords = geocode_marker(args.marker)
+        # Geocode markers if provided
+        markers = []
+        if args.markers:
+            labels = args.marker_labels or []
+            for i, address in enumerate(args.markers):
+                coords_marker = geocode_marker(address)
+                label = labels[i] if i < len(labels) else ("Home" if i == 0 else "")
+                markers.append((coords_marker, label))
 
         for theme_name in themes_to_generate:
             THEME = load_theme(theme_name)
@@ -1150,8 +1164,7 @@ Examples:
                 display_city=args.display_city,
                 display_country=args.display_country,
                 fonts=custom_fonts,
-                marker_point=marker_coords,
-                marker_label=args.marker_label,
+                markers=markers or None,
             )
 
         print("\n" + "=" * 50)
