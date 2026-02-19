@@ -316,6 +316,56 @@ def get_edge_widths_by_type(g):
     return edge_widths
 
 
+def geocode_marker(address):
+    """
+    Geocode a marker address string to (lat, lon) using Nominatim.
+
+    Args:
+        address: Address string to geocode (e.g., "Stóragerði 40, Reykjavík")
+
+    Returns:
+        (latitude, longitude) tuple
+
+    Raises:
+        ValueError: If the address cannot be geocoded
+    """
+    cache_key = f"marker_{address.lower()}"
+    cached = cache_get(cache_key)
+    if cached:
+        print(f"✓ Using cached marker coordinates for {address}")
+        return cached
+
+    print(f"Geocoding marker address: {address}...")
+    geolocator = Nominatim(user_agent="city_map_poster", timeout=10)
+    time.sleep(1)
+
+    try:
+        location = geolocator.geocode(address)
+    except Exception as e:
+        raise ValueError(f"Geocoding failed for marker address '{address}': {e}") from e
+
+    if asyncio.iscoroutine(location):
+        try:
+            location = asyncio.run(location)
+        except RuntimeError as exc:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                raise RuntimeError(
+                    "Geocoder returned a coroutine while an event loop is already running."
+                ) from exc
+            location = loop.run_until_complete(location)
+
+    if location:
+        print(f"✓ Marker location: {location.latitude}, {location.longitude}")
+        try:
+            cache_set(cache_key, (location.latitude, location.longitude))
+        except CacheError as e:
+            print(e)
+        return (location.latitude, location.longitude)
+
+    raise ValueError(f"Could not geocode marker address: {address}")
+
+
 def get_coordinates(city, country):
     """
     Fetches coordinates for a given city and country using geopy.
@@ -493,6 +543,8 @@ def create_poster(
     display_city=None,
     display_country=None,
     fonts=None,
+    marker_point=None,
+    marker_label="Home",
 ):
     """
     Generate a complete map poster with roads, water, parks, and typography.
@@ -610,6 +662,49 @@ def create_poster(
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlim(crop_xlim)
     ax.set_ylim(crop_ylim)
+
+    # Layer 2.5: Marker
+    if marker_point is not None:
+        marker_lat, marker_lon = marker_point
+        marker_proj = ox.projection.project_geometry(
+            Point(marker_lon, marker_lat),
+            crs="EPSG:4326",
+            to_crs=g_proj.graph["crs"],
+        )[0]
+        marker_x, marker_y = marker_proj.x, marker_proj.y
+
+        scale_factor_marker = min(height, width) / 12.0
+        dot_size = 8 * scale_factor_marker
+        ax.plot(
+            marker_x, marker_y, 'o',
+            color=THEME["text"],
+            markersize=dot_size,
+            zorder=9,
+        )
+
+        active_marker_fonts = fonts or FONTS
+        if active_marker_fonts:
+            marker_font = FontProperties(
+                fname=active_marker_fonts["regular"],
+                size=12 * scale_factor_marker,
+            )
+        else:
+            marker_font = FontProperties(
+                family="monospace", size=12 * scale_factor_marker,
+            )
+
+        # Offset label to the right of the dot
+        x_range = crop_xlim[1] - crop_xlim[0]
+        label_offset_x = x_range * 0.015
+        ax.annotate(
+            marker_label,
+            xy=(marker_x, marker_y),
+            xytext=(marker_x + label_offset_x, marker_y),
+            color=THEME["text"],
+            fontproperties=marker_font,
+            va="center",
+            zorder=9,
+        )
 
     # Layer 3: Gradients (Top and Bottom)
     create_gradient_fade(ax, THEME['gradient_color'], location='bottom', zorder=10)
@@ -955,6 +1050,19 @@ Examples:
         choices=["png", "svg", "pdf"],
         help="Output format for the poster (default: png)",
     )
+    parser.add_argument(
+        "--marker",
+        "-m",
+        type=str,
+        help='Address to place a marker dot on the map (e.g., "Stóragerði 40, Reykjavík")',
+    )
+    parser.add_argument(
+        "--marker-label",
+        dest="marker_label",
+        type=str,
+        default="Home",
+        help='Label text next to the marker dot (default: "Home")',
+    )
 
     args = parser.parse_args()
 
@@ -1021,6 +1129,11 @@ Examples:
         else:
             coords = get_coordinates(args.city, args.country)
 
+        # Geocode marker if provided
+        marker_coords = None
+        if args.marker:
+            marker_coords = geocode_marker(args.marker)
+
         for theme_name in themes_to_generate:
             THEME = load_theme(theme_name)
             output_file = generate_output_filename(args.city, theme_name, args.format)
@@ -1037,6 +1150,8 @@ Examples:
                 display_city=args.display_city,
                 display_country=args.display_country,
                 fonts=custom_fonts,
+                marker_point=marker_coords,
+                marker_label=args.marker_label,
             )
 
         print("\n" + "=" * 50)
